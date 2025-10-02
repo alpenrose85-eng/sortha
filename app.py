@@ -82,18 +82,33 @@ def create_sample_key(sample_name: str) -> str:
     """
     normalized = re.sub(r'\s+', ' ', sample_name.strip()).lower()
     
-    patterns = [
-        r'([а-я]+)\s*([а-я]+)?\s*\((\d+[-\d]*),\s*([а-я])\)',
-        r'([а-я]+)\s*([а-я]+)?-?(\d+)?\s*\((\d+),\s*([а-я])\)',
-        r'(\d+)[,_]\s*([а-я]+)',
+    # Паттерны для правильных названий (из файла порядка)
+    patterns_correct = [
+        r'([а-я]+)\s*([а-я]+)?\s*\((\d+[-\d]*),\s*([а-я])\)',  # КПП ВД(50,А)
+        r'([а-я]+)\s*([а-я]+)?-?(\d+)?\s*\((\d+),\s*([а-я])\)', # КПП НД-1(19,А)
     ]
     
-    for pattern in patterns:
+    # Паттерны для названий из химического анализа
+    patterns_analysis = [
+        r'([а-я]+)\s*([а-я]+)?\s*(\d+)',  # НГ ШПП 4
+        r'(\d+)[,_]\s*([а-я]+)',  # 28_КПП ВД
+    ]
+    
+    # Сначала пробуем паттерны для правильных названий
+    for pattern in patterns_correct:
         match = re.search(pattern, normalized)
         if match:
             parts = [p for p in match.groups() if p]
             return '_'.join(parts)
     
+    # Затем пробуем паттерны для названий анализа
+    for pattern in patterns_analysis:
+        match = re.search(pattern, normalized)
+        if match:
+            parts = [p for p in match.groups() if p]
+            return '_'.join(parts)
+    
+    # Если паттерн не найден, ищем числа в названии
     numbers = re.findall(r'\d+', normalized)
     if numbers:
         return f"sample_{numbers[-1]}"
@@ -124,40 +139,25 @@ def parse_chemical_tables(file_content: str) -> Dict[str, List[Dict]]:
             current_steel_grade = steel_match.group(1).strip()
             continue
         
-        # Более гибкий поиск строк с образцами
-        if current_steel_grade:
-            # Пропускаем технические строки
-            if any(x in line for x in ['Требования ТУ', '14-3Р-55-2001', '---', '###']):
-                continue
-            
+        # Пропускаем технические строки
+        if any(x in line for x in ['Требования ТУ', '14-3Р-55-2001', '---', '###']):
+            continue
+        
+        # Более простой и надежный поиск строк с образцами
+        if current_steel_grade and re.search(r'[кК][пП][пП]|[шШ][пП][пП]|[эЭ][пП][кК]', line):
             # Ищем строки, которые содержат номер и название образца
-            # Более гибкий паттерн: число, потом текст, потом числа с запятыми
-            if re.match(r'^\s*\d+\s+[^\d]', line) and re.search(r'\d+,\d+', line):
-                # Пробуем разные способы разделения
-                parts = []
-                
-                # Попробуем разделить по множественным пробелам
-                temp_parts = re.split(r'\s{2,}', line)
-                if len(temp_parts) >= 3:
-                    parts = temp_parts
-                else:
-                    # Если не получилось, пробуем разделить по одиночным пробелам
-                    temp_parts = line.split()
-                    if len(temp_parts) >= 3:
-                        # Найдем где заканчивается название и начинаются измерения
-                        # Измерения - это числа с запятыми
-                        for i in range(2, len(temp_parts)):
-                            if re.match(r'^\d+,\d+$', temp_parts[i]):
-                                name_parts = temp_parts[1:i]
-                                measurement_parts = temp_parts[i:]
-                                parts = [temp_parts[0], ' '.join(name_parts)] + measurement_parts
-                                break
-                
-                if len(parts) >= 3:
+            if re.match(r'^\s*\d+\s+[^\d]', line) and re.search(r'\d', line):
+                # Разделяем по множественным пробелам
+                parts = re.split(r'\s{2,}', line)
+                if len(parts) >= 2:
+                    # Берем только название образца (вторая часть)
+                    sample_name = parts[1]
+                    measurements = parts[2:] if len(parts) > 2 else []
+                    
                     sample_data = {
-                        'original_name': parts[1],
-                        'measurements': parts[2:],
-                        'key': create_sample_key(parts[1])
+                        'original_name': sample_name,
+                        'measurements': measurements,
+                        'key': create_sample_key(sample_name)
                     }
                     current_table.append(sample_data)
     
@@ -166,6 +166,44 @@ def parse_chemical_tables(file_content: str) -> Dict[str, List[Dict]]:
         tables[current_steel_grade] = current_table
     
     return tables
+
+def create_comparison_table(correct_samples: List[Dict], chemical_tables: Dict[str, List[Dict]]) -> pd.DataFrame:
+    """
+    Создает таблицу сравнения названий образцов
+    """
+    data = []
+    
+    # Собираем все образцы из химического анализа
+    all_analysis_samples = []
+    for steel_grade, samples in chemical_tables.items():
+        for sample in samples:
+            all_analysis_samples.append({
+                'name': sample['original_name'],
+                'key': sample['key'],
+                'steel_grade': steel_grade
+            })
+    
+    # Создаем строки для правильных образцов
+    for correct in correct_samples:
+        data.append({
+            'Тип': 'Правильный порядок',
+            '№ п/п': correct['order'],
+            'Название образца': correct['correct_name'],
+            'Ключ': correct['key'],
+            'Марка стали': '-'
+        })
+    
+    # Создаем строки для образцов из анализа
+    for i, analysis in enumerate(all_analysis_samples):
+        data.append({
+            'Тип': 'Химический анализ',
+            '№ п/п': i + 1,
+            'Название образца': analysis['name'],
+            'Ключ': analysis['key'],
+            'Марка стали': analysis['steel_grade']
+        })
+    
+    return pd.DataFrame(data)
 
 def match_and_sort_samples(original_samples: List[Dict], correct_samples: List[Dict]) -> List[Dict]:
     """
@@ -192,21 +230,6 @@ def match_and_sort_samples(original_samples: List[Dict], correct_samples: List[D
     matched_samples.sort(key=lambda x: x['order'])
     return matched_samples
 
-def create_matching_table(matched_samples: List[Dict]) -> pd.DataFrame:
-    """
-    Создает таблицу сопоставления названий
-    """
-    data = []
-    for sample in matched_samples:
-        data.append({
-            '№ п/п': sample['order'],
-            'Правильное название': sample['correct_name'],
-            'Название из анализа': sample['original_name'],
-            'Ключ сопоставления': sample['key']
-        })
-    
-    return pd.DataFrame(data)
-
 # =============================================================================
 # STREAMLIT ИНТЕРФЕЙС
 # =============================================================================
@@ -226,12 +249,8 @@ st.markdown("""
         margin-bottom: 2rem;
         font-weight: bold;
     }
-    .debug-box {
-        background-color: #fff3cd;
-        border: 1px solid #ffeaa7;
-        border-radius: 5px;
-        padding: 15px;
-        margin: 10px 0;
+    .comparison-table {
+        margin: 20px 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -245,7 +264,10 @@ def main():
         1. Загрузите файл с правильным порядком образцов
         2. Загрузите файл с результатами химического анализа  
         3. Нажмите кнопку "Обработать данные"
-        4. Просмотрите таблицу сопоставления и отсортированные результаты
+        4. Просмотрите таблицу сравнения названий
+        5. Скачайте отсортированные результаты
+
+        **Следующий шаг:** Будем улучшать алгоритм сопоставления на основе увиденных данных
         """)
     
     # Загрузка файлов
@@ -273,9 +295,6 @@ def main():
         if chemical_analysis_file:
             st.success(f"✅ Загружен: {chemical_analysis_file.name}")
     
-    # Отладочная информация
-    debug_mode = st.checkbox("🔧 Режим отладки (показать сырые данные)")
-    
     # Кнопка обработки
     if st.button("🚀 ОБРАБОТАТЬ ДАННЫЕ", type="primary", use_container_width=True):
         if not correct_order_file or not chemical_analysis_file:
@@ -292,14 +311,6 @@ def main():
                 st.error("❌ Ошибка чтения файлов")
                 return
             
-            if debug_mode:
-                st.subheader("🔍 СЫРЫЕ ДАННЫЕ")
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.text_area("Файл порядка:", correct_order_content, height=200)
-                with col2:
-                    st.text_area("Файл анализа:", chemical_analysis_content, height=200)
-            
             # Парсинг
             with st.spinner("🔍 Анализирую данные..."):
                 correct_samples = parse_correct_order(correct_order_content)
@@ -311,81 +322,84 @@ def main():
                 
             if not chemical_tables:
                 st.error("❌ Не найдены таблицы анализа")
-                
-                # Показываем отладочную информацию
-                st.markdown('<div class="debug-box">', unsafe_allow_html=True)
-                st.write("**Отладочная информация:**")
-                st.write("Попробую найти образцы вручную...")
-                
-                # Альтернативный парсинг
-                lines = chemical_analysis_content.split('\n')
-                found_samples = []
-                for i, line in enumerate(lines):
-                    if re.search(r'КПП|труба|\d+,\d+', line) and not any(x in line for x in ['Требования', 'Марка стали']):
-                        st.write(f"Строка {i}: {line[:100]}...")
-                        found_samples.append(line)
-                
-                if found_samples:
-                    st.write(f"Найдено потенциальных строк: {len(found_samples)}")
-                st.markdown('</div>', unsafe_allow_html=True)
                 return
             
-            # Отладочная информация о найденных данных
-            if debug_mode:
-                st.subheader("🔍 ПАРСИНГ ДАННЫХ")
-                st.write(f"Найдено образцов в правильном порядке: {len(correct_samples)}")
-                for sample in correct_samples[:5]:
-                    st.write(f" - №{sample['order']}: {sample['correct_name']} → ключ: {sample['key']}")
-                
-                st.write(f"Найдено таблиц анализа: {len(chemical_tables)}")
-                for steel_grade, samples in chemical_tables.items():
-                    st.write(f" - {steel_grade}: {len(samples)} образцов")
-                    for sample in samples[:3]:
-                        st.write(f"   * {sample['original_name']} → ключ: {sample['key']}")
+            # ПОКАЗЫВАЕМ ТАБЛИЦУ СРАВНЕНИЯ
+            st.subheader("🔍 ТАБЛИЦА СРАВНЕНИЯ НАЗВАНИЙ")
             
-            # Обработка
-            with st.spinner("🔄 Сопоставляю и сортирую..."):
-                final_tables = {}
-                all_matched_samples = []
-                
-                for steel_grade, samples in chemical_tables.items():
-                    sorted_samples = match_and_sort_samples(samples, correct_samples)
-                    if sorted_samples:
-                        num_measurements = len(sorted_samples[0]['measurements'])
-                        columns = ['№', 'Образец'] + [f'Измерение {i+1}' for i in range(num_measurements)]
-                        
-                        data = []
-                        for i, sample in enumerate(sorted_samples):
-                            row = [i+1, sample['correct_name']] + sample['measurements']
-                            data.append(row)
-                        
-                        final_tables[steel_grade] = pd.DataFrame(data, columns=columns)
-                        all_matched_samples.extend(sorted_samples)
+            comparison_df = create_comparison_table(correct_samples, chemical_tables)
+            st.dataframe(comparison_df, use_container_width=True)
             
             # Статистика
-            total_matched = len(all_matched_samples)
-            total_chemical = sum(len(samples) for samples in chemical_tables.values())
             total_correct = len(correct_samples)
-            matching_rate = (total_matched / total_chemical) * 100 if total_chemical > 0 else 0
+            total_analysis = sum(len(samples) for samples in chemical_tables.values())
             
-            # Показываем статистику
             st.subheader("📊 СТАТИСТИКА")
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2 = st.columns(2)
             
             with col1:
-                st.metric("Образцов в порядке", total_correct)
+                st.metric("Образцов в правильном порядке", total_correct)
             with col2:
-                st.metric("Образцов в анализе", total_chemical)
-            with col3:
-                st.metric("Сопоставлено", total_matched)
-            with col4:
-                st.metric("Процент сопоставления", f"{matching_rate:.1f}%")
+                st.metric("Образцов в анализе", total_analysis)
             
-            # ТАБЛИЦА СОПОСТАВЛЕНИЯ
-            if all_matched_samples:
-                st.subheader("🔍 ТАБЛИЦА СОПОСТАВЛЕНИЯ")
-                matching_df = create_matching_table(all_matched_samples)
-                st.dataframe(matching_df, use_container_width=True)
+            # Показываем детальную информацию о ключах
+            st.subheader("🔑 ИНФОРМАЦИЯ О КЛЮЧАХ СОПОСТАВЛЕНИЯ")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**Ключи из правильного порядка:**")
+                for sample in correct_samples[:10]:  # Показываем первые 10
+                    st.write(f"`{sample['key']}` → \"{sample['correct_name']}\"")
+            
+            with col2:
+                st.write("**Ключи из химического анализа:**")
+                all_analysis_samples = []
+                for steel_grade, samples in chemical_tables.items():
+                    all_analysis_samples.extend(samples)
+                for sample in all_analysis_samples[:10]:  # Показываем первые 10
+                    st.write(f"`{sample['key']}` → \"{sample['original_name']}\"")
+            
+            # Пробуем сопоставить
+            st.subheader("🔄 ПОПЫТКА СОПОСТАВЛЕНИЯ")
+            
+            all_matched_samples = []
+            final_tables = {}
+            
+            for steel_grade, samples in chemical_tables.items():
+                sorted_samples = match_and_sort_samples(samples, correct_samples)
+                all_matched_samples.extend(sorted_samples)
+                
+                if sorted_samples:
+                    num_measurements = len(sorted_samples[0]['measurements'])
+                    columns = ['№', 'Образец'] + [f'Измерение {i+1}' for i in range(num_measurements)]
+                    
+                    data = []
+                    for i, sample in enumerate(sorted_samples):
+                        row = [i+1, sample['correct_name']] + sample['measurements']
+                        data.append(row)
+                    
+                    final_tables[steel_grade] = pd.DataFrame(data, columns=columns)
+            
+            total_matched = len(all_matched_samples)
+            matching_rate = (total_matched / total_analysis) * 100 if total_analysis > 0 else 0
+            
+            st.metric("Сопоставлено образцов", f"{total_matched} ({matching_rate:.1f}%)")
+            
+            if total_matched > 0:
+                st.success(f"✅ Удалось сопоставить {total_matched} образцов!")
+                
+                # Показываем таблицу сопоставления
+                st.subheader("📋 ТАБЛИЦА СОПОСТАВЛЕННЫХ ОБРАЗЦОВ")
+                matched_data = []
+                for sample in all_matched_samples:
+                    matched_data.append({
+                        '№ п/п': sample['order'],
+                        'Правильное название': sample['correct_name'],
+                        'Исходное название': sample['original_name'],
+                        'Ключ': sample['key']
+                    })
+                st.dataframe(pd.DataFrame(matched_data), use_container_width=True)
             
             # ОТСОРТИРОВАННЫЕ РЕЗУЛЬТАТЫ
             if final_tables:
@@ -420,14 +434,25 @@ def main():
                     
                     st.download_button(
                         label="📦 Скачать все таблицы (Excel)",
-                        data=ex_buffer_all,
+                        data=excel_buffer_all,
                         file_name="все_отсортированные_таблицы.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="download_all",
                         use_container_width=True
                     )
             else:
-                st.warning("⚠️ Не удалось сопоставить образцы")
+                st.warning("""
+                ⚠️ **Не удалось автоматически сопоставить образцы**
+                
+                **Что дальше?**
+                1. Посмотрите на таблицу сравнения выше
+                2. Проанализируйте ключи сопоставления
+                3. Мы улучшим алгоритм на основе этих данных
+                
+                **Пожалуйста, сообщите:**
+                - Какие образцы должны быть сопоставлены?
+                - По каким признакам они должны сопоставляться (цифры, буквы, комбинации)?
+                """)
                 
         except Exception as e:
             st.error(f"❌ Ошибка: {str(e)}")
