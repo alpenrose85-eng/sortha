@@ -96,7 +96,7 @@ def create_sample_key(sample_name: str) -> str:
     # Извлекаем ключевые компоненты для сопоставления
     patterns = [
         r'([а-я]+)\s*([а-я]+)?\s*\((\d+[-\d]*),\s*([а-я])\)',  # КПП ВД(50,А)
-        r'([а-я]+)\s*([а-я]+)?-?(\d+)\s*\((\d+),\s*([а-я])\)', # КПП НД-1(19,А)
+        r'([а-я]+)\s*([а-я]+)?-?(\d+)?\s*\((\d+),\s*([а-я])\)', # КПП НД-1(19,А)
         r'(\d+)[,_]\s*([а-я]+)',  # Для формата "28_КПП ВД"
     ]
     
@@ -170,9 +170,10 @@ def parse_chemical_tables(file_content: str) -> Dict[str, List[Dict]]:
     
     return tables
 
-def match_and_sort_samples(original_samples: List[Dict], correct_samples: List[Dict]) -> List[Dict]:
+def match_and_sort_samples(original_samples: List[Dict], correct_samples: List[Dict]) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
     Сопоставляет и сортирует образцы по правильному порядку
+    Возвращает: (сопоставленные, несопоставленные_правильные, несопоставленные_анализ)
     """
     key_to_correct = {}
     for correct in correct_samples:
@@ -182,17 +183,44 @@ def match_and_sort_samples(original_samples: List[Dict], correct_samples: List[D
         }
     
     matched_samples = []
+    used_keys = set()
+    
     for original in original_samples:
         if original['key'] in key_to_correct:
             matched_samples.append({
                 'correct_name': key_to_correct[original['key']]['correct_name'],
                 'measurements': original['measurements'],
                 'order': key_to_correct[original['key']]['order'],
-                'original_name': original['original_name']
+                'original_name': original['original_name'],
+                'key': original['key']
             })
+            used_keys.add(original['key'])
     
+    # Сортируем по порядку из правильного списка
     matched_samples.sort(key=lambda x: x['order'])
-    return matched_samples
+    
+    # Находим несопоставленные образцы из правильного порядка
+    unmatched_correct = [correct for correct in correct_samples if correct['key'] not in used_keys]
+    
+    # Находим несопоставленные образцы из анализа
+    unmatched_analysis = [original for original in original_samples if original['key'] not in key_to_correct]
+    
+    return matched_samples, unmatched_correct, unmatched_analysis
+
+def create_matching_table(matched_samples: List[Dict]) -> pd.DataFrame:
+    """
+    Создает таблицу сопоставления названий
+    """
+    data = []
+    for sample in matched_samples:
+        data.append({
+            '№ п/п': sample['order'],
+            'Правильное название': sample['correct_name'],
+            'Название из анализа': sample['original_name'],
+            'Ключ сопоставления': sample['key']
+        })
+    
+    return pd.DataFrame(data)
 
 # =============================================================================
 # STREAMLIT ИНТЕРФЕЙС
@@ -257,16 +285,14 @@ def main():
         1. **Загрузите файл с правильным порядком образцов** (TXT или DOCX формат)
         2. **Загрузите файл с результатами химического анализа** (TXT или DOCX формат)  
         3. **Нажмите кнопку "Обработать данные"**
-        4. **Просмотрите результаты и скачайте отсортированные таблицы**
+        4. **Просмотрите таблицу сопоставления** - проверьте, правильно ли программа сопоставила образцы
+        5. **Скачайте отсортированные таблицы**
 
-        ### Поддерживаемые форматы:
-        - Текстовые файлы (.txt)
-        - Документы Word (.docx)
-
-        ### Примеры сопоставления названий:
-        - "КПП ВД 2, труба 28" → "КПП ВД(28,Г)"
-        - "НГ 28_КПП ВД" → "КПП ВД(28,Г)" 
-        - "КПП ВД 2, труба 122" → "КПП ВД(50,А)"
+        ### Принцип сопоставления:
+        Программа ищет совпадения по **цифрам и буквам** в названиях образцов:
+        - "КПП ВД 2, труба 28" → "КПП ВД(28,Г)" (сопоставление по числу 28)
+        - "НГ 28_КПП ВД" → "КПП ВД(28,Г)" (сопоставление по числу 28)
+        - "КПП ВД 2, труба 122" → "КПП ВД(50,А)" (сопоставление по числу 50)
         """)
     
     # Загрузка файлов
@@ -296,29 +322,6 @@ def main():
         if chemical_analysis_file:
             st.markdown(f'<div class="file-info">✅ Файл загружен: <b>{chemical_analysis_file.name}</b> ({chemical_analysis_file.type})</div>', unsafe_allow_html=True)
     
-    # Предпросмотр содержимого
-    preview_col1, preview_col2 = st.columns(2)
-    
-    with preview_col1:
-        if correct_order_file and st.checkbox("Показать содержимое файла с порядком", key="preview_order"):
-            content = read_uploaded_file(correct_order_file)
-            if content:
-                st.text_area("Содержимое файла с порядком:", content, height=300, key="text_order")
-                
-                # Отладочная информация
-                if st.checkbox("Показать отладочную информацию", key="debug_order"):
-                    st.markdown("### Отладочная информация:")
-                    samples = parse_correct_order(content)
-                    st.write(f"Найдено образцов: {len(samples)}")
-                    for sample in samples[:10]:  # Показываем первые 10
-                        st.write(f"№{sample['order']}: '{sample['correct_name']}' -> ключ: '{sample['key']}'")
-    
-    with preview_col2:
-        if chemical_analysis_file and st.checkbox("Показать содержимое файла с анализом", key="preview_analysis"):
-            content = read_uploaded_file(chemical_analysis_file)
-            if content:
-                st.text_area("Содержимое файла с анализом:", content, height=300, key="text_analysis")
-    
     # Кнопка обработки
     if st.button("🚀 ОБРАБОТАТЬ ДАННЫЕ", type="primary", use_container_width=True):
         if not correct_order_file or not chemical_analysis_file:
@@ -333,12 +336,10 @@ def main():
             
             if not correct_order_content:
                 st.error("❌ Не удалось прочитать файл с правильным порядком")
-                st.info("Попробуйте сохранить файл как TXT или проверьте, что DOCX файл не поврежден")
                 return
                 
             if not chemical_analysis_content:
                 st.error("❌ Не удалось прочитать файл с химическим анализом")
-                st.info("Попробуйте сохранить файл как TXT или проверьте, что DOCX файл не поврежден")
                 return
             
             # Парсинг
@@ -348,114 +349,131 @@ def main():
             
             if not correct_samples:
                 st.error("❌ Не удалось найти образцы в файле с правильным порядком")
-                st.markdown("""
-                **Возможные причины:**
-                - Файл имеет неожиданный формат
-                - Номера образцов не распознаются
-                - Названия образцов содержат специальные символы
-                """)
-                
-                # Показываем отладочную информацию
-                st.markdown('<div class="debug-info">', unsafe_allow_html=True)
-                st.write("**Содержимое файла:**")
-                st.text(correct_order_content[:1000] + "..." if len(correct_order_content) > 1000 else correct_order_content)
-                st.markdown('</div>', unsafe_allow_html=True)
                 return
                 
             if not chemical_tables:
                 st.error("❌ Не удалось найти таблицы химического анализа")
-                st.info("Убедитесь, что файл содержит таблицы с марками стали и данными образцов")
                 return
             
-            # Обработка
-            with st.spinner("🔄 Сортирую образцы..."):
-                final_tables = {}
+            # Обработка и сопоставление
+            with st.spinner("🔄 Сопоставляю образцы..."):
+                all_matched_samples = []
+                all_unmatched_correct = []
+                all_unmatched_analysis = []
+                
                 for steel_grade, samples in chemical_tables.items():
-                    sorted_samples = match_and_sort_samples(samples, correct_samples)
-                    if sorted_samples:
-                        num_measurements = len(sorted_samples[0]['measurements'])
-                        columns = ['№', 'Образец'] + [f'Измерение {i+1}' for i in range(num_measurements)]
-                        
-                        data = []
-                        for i, sample in enumerate(sorted_samples):
-                            row = [i+1, sample['correct_name']] + sample['measurements']
-                            data.append(row)
-                        
-                        final_tables[steel_grade] = pd.DataFrame(data, columns=columns)
+                    matched_samples, unmatched_correct, unmatched_analysis = match_and_sort_samples(samples, correct_samples)
+                    all_matched_samples.extend(matched_samples)
+                    all_unmatched_correct.extend(unmatched_correct)
+                    all_unmatched_analysis.extend(unmatched_analysis)
             
-            # Отображение результатов
-            if final_tables:
-                st.success(f"✅ Успешно обработано {len(final_tables)} таблиц")
+            # СОЗДАЕМ ТАБЛИЦУ СОПОСТАВЛЕНИЯ
+            st.subheader("🔍 ТАБЛИЦА СОПОСТАВЛЕНИЯ НАЗВАНИЙ")
+            
+            if all_matched_samples:
+                # Создаем таблицу сопоставления
+                matching_df = create_matching_table(all_matched_samples)
                 
-                # Статистика
-                total_matched = sum(len(table) for table in final_tables.values())
-                total_chemical = sum(len(samples) for samples in chemical_tables.values())
+                # Показываем таблицу
+                st.dataframe(matching_df, use_container_width=True)
+                
+                # Статистика сопоставления
                 total_correct = len(correct_samples)
-                matching_rate = (total_matched / total_chemical) * 100 if total_chemical > 0 else 0
+                total_matched = len(all_matched_samples)
+                total_unmatched_correct = len(all_unmatched_correct)
+                total_unmatched_analysis = len(all_unmatched_analysis)
+                matching_rate = (total_matched / total_correct) * 100 if total_correct > 0 else 0
                 
-                # Отображение статистики
-                st.subheader("📊 СТАТИСТИКА ОБРАБОТКИ")
-                col1, col2, col3, col4 = st.columns(4)
+                st.success(f"✅ Сопоставлено {total_matched} из {total_correct} образцов ({matching_rate:.1f}%)")
                 
-                with col1:
-                    st.markdown(f'<div class="stats-card">Образцов в правильном порядке<br><span class="success-text">{total_correct}</span></div>', unsafe_allow_html=True)
-                with col2:
-                    st.markdown(f'<div class="stats-card">Образцов в анализе<br><span class="success-text">{total_chemical}</span></div>', unsafe_allow_html=True)
-                with col3:
-                    st.markdown(f'<div class="stats-card">Сопоставлено образцов<br><span class="success-text">{total_matched}</span></div>', unsafe_allow_html=True)
-                with col4:
-                    color_class = "success-text" if matching_rate > 80 else "warning-text"
-                    st.markdown(f'<div class="stats-card">Процент сопоставления<br><span class="{color_class}">{matching_rate:.1f}%</span></div>', unsafe_allow_html=True)
+                # Показываем несопоставленные образцы
+                if all_unmatched_correct:
+                    st.warning(f"⚠️ Не сопоставлено {total_unmatched_correct} образцов из правильного порядка:")
+                    unmatched_data = []
+                    for sample in all_unmatched_correct:
+                        unmatched_data.append({
+                            '№ п/п': sample['order'],
+                            'Правильное название': sample['correct_name'],
+                            'Ключ': sample['key']
+                        })
+                    st.dataframe(pd.DataFrame(unmatched_data), use_container_width=True)
                 
-                # Отображение таблиц
-                st.subheader("📋 РЕЗУЛЬТАТЫ СОРТИРОВКИ")
+                if all_unmatched_analysis:
+                    st.warning(f"⚠️ Не сопоставлено {total_unmatched_analysis} образцов из анализа:")
+                    unmatched_analysis_data = []
+                    for sample in all_unmatched_analysis:
+                        unmatched_analysis_data.append({
+                            'Название из анализа': sample['original_name'],
+                            'Ключ': sample['key']
+                        })
+                    st.dataframe(pd.DataFrame(unmatched_analysis_data), use_container_width=True)
                 
-                for steel_grade, table in final_tables.items():
-                    with st.expander(f"🔩 Марка стали: {steel_grade} ({len(table)} образцов)", expanded=True):
-                        st.dataframe(table, use_container_width=True)
-                        
-                        # Скачивание отдельной таблицы
-                        excel_buffer = io.BytesIO()
-                        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                            table.to_excel(writer, index=False, sheet_name=steel_grade[:30])
-                        excel_buffer.seek(0)
+                # Кнопка для продолжения - показать отсортированные таблицы
+                if st.button("📊 ПОКАЗАТЬ ОТСОРТИРОВАННЫЕ ТАБЛИЦЫ", type="secondary"):
+                    # Создаем финальные таблицы
+                    final_tables = {}
+                    for steel_grade, samples in chemical_tables.items():
+                        matched_samples, _, _ = match_and_sort_samples(samples, correct_samples)
+                        if matched_samples:
+                            num_measurements = len(matched_samples[0]['measurements'])
+                            columns = ['№', 'Образец'] + [f'Измерение {i+1}' for i in range(num_measurements)]
+                            
+                            data = []
+                            for i, sample in enumerate(matched_samples):
+                                row = [i+1, sample['correct_name']] + sample['measurements']
+                                data.append(row)
+                            
+                            final_tables[steel_grade] = pd.DataFrame(data, columns=columns)
+                    
+                    # Показываем отсортированные таблицы
+                    st.subheader("📋 ОТСОРТИРОВАННЫЕ РЕЗУЛЬТАТЫ")
+                    
+                    for steel_grade, table in final_tables.items():
+                        with st.expander(f"🔩 Марка стали: {steel_grade} ({len(table)} образцов)", expanded=True):
+                            st.dataframe(table, use_container_width=True)
+                            
+                            # Скачивание отдельной таблицы
+                            excel_buffer = io.BytesIO()
+                            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                                table.to_excel(writer, index=False, sheet_name=steel_grade[:30])
+                            excel_buffer.seek(0)
+                            
+                            st.download_button(
+                                label=f"📥 Скачать таблицу {steel_grade} (Excel)",
+                                data=excel_buffer,
+                                file_name=f"отсортировано_{steel_grade}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key=f"download_{steel_grade}"
+                            )
+                    
+                    # Пакетное скачивание
+                    if len(final_tables) > 1:
+                        st.subheader("💾 ПАКЕТНОЕ СКАЧИВАНИЕ")
+                        excel_buffer_all = io.BytesIO()
+                        with pd.ExcelWriter(excel_buffer_all, engine='openpyxl') as writer:
+                            for steel_grade, table in final_tables.items():
+                                table.to_excel(writer, index=False, sheet_name=steel_grade[:30])
+                        excel_buffer_all.seek(0)
                         
                         st.download_button(
-                            label=f"📥 Скачать таблицу {steel_grade} (Excel)",
-                            data=excel_buffer,
-                            file_name=f"отсортировано_{steel_grade}.xlsx",
+                            label="📦 Скачать все таблицы (Excel)",
+                            data=excel_buffer_all,
+                            file_name="все_отсортированные_таблицы.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key=f"download_{steel_grade}"
+                            key="download_all",
+                            use_container_width=True
                         )
-                
-                # Пакетное скачивание
-                if len(final_tables) > 1:
-                    st.subheader("💾 ПАКЕТНОЕ СКАЧИВАНИЕ")
-                    excel_buffer_all = io.BytesIO()
-                    with pd.ExcelWriter(excel_buffer_all, engine='openpyxl') as writer:
-                        for steel_grade, table in final_tables.items():
-                            table.to_excel(writer, index=False, sheet_name=steel_grade[:30])
-                    excel_buffer_all.seek(0)
-                    
-                    st.download_button(
-                        label="📦 Скачать все таблицы (Excel)",
-                        data=excel_buffer_all,
-                        file_name="все_отсортированные_таблицы.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="download_all",
-                        use_container_width=True
-                    )
             else:
-                st.warning("⚠️ Не удалось сопоставить ни одного образца. Проверьте соответствие названий в файлах.")
+                st.error("❌ Не удалось сопоставить ни одного образца")
                 
-                # Показываем отладочную информацию о ключах
-                st.markdown("### Отладочная информация о ключах:")
+                # Показываем отладочную информацию
+                st.markdown("### 🔍 Отладочная информация:")
                 col1, col2 = st.columns(2)
                 
                 with col1:
                     st.write("**Ключи из правильного порядка:**")
                     for sample in correct_samples[:10]:
-                        st.write(f"- {sample['key']} -> '{sample['correct_name']}'")
+                        st.write(f"- {sample['key']} → '{sample['correct_name']}'")
                 
                 with col2:
                     st.write("**Ключи из химического анализа:**")
@@ -463,7 +481,7 @@ def main():
                     for samples in chemical_tables.values():
                         all_analysis_samples.extend(samples)
                     for sample in all_analysis_samples[:10]:
-                        st.write(f"- {sample['key']} -> '{sample['original_name']}'")
+                        st.write(f"- {sample['key']} → '{sample['original_name']}'")
                 
         except Exception as e:
             st.error(f"❌ Произошла ошибка при обработке: {str(e)}")
@@ -479,7 +497,8 @@ def main():
     
     **Основные возможности:**
     - 📄 Поддержка форматов TXT и DOCX
-    - 🔍 Автоматическое сопоставление образцов по идентификаторам
+    - 🔍 Автоматическое сопоставление образцов по цифрам и буквам в названиях
+    - 👁️ Визуализация таблицы сопоставления для проверки
     - 📊 Обработка нескольких таблиц в одном файле
     - 📤 Экспорт результатов в Excel
     
