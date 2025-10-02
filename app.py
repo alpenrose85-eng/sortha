@@ -14,20 +14,16 @@ def read_uploaded_file(file):
     Читает содержимое загруженного файла в зависимости от его типа
     """
     try:
-        # Всегда сбрасываем позицию чтения файла
         file.seek(0)
         
         if file.name.endswith('.docx'):
-            # Читаем DOCX файл
             doc = docx.Document(file)
             full_text = []
             
-            # Читаем все параграфы
             for paragraph in doc.paragraphs:
-                if paragraph.text.strip():  # Игнорируем пустые строки
+                if paragraph.text.strip():
                     full_text.append(paragraph.text)
             
-            # Читаем таблицы, если есть
             for table in doc.tables:
                 for row in table.rows:
                     row_text = []
@@ -37,10 +33,8 @@ def read_uploaded_file(file):
                     if row_text:
                         full_text.append(" | ".join(row_text))
             
-            content = "\n".join(full_text)
-            return content
+            return "\n".join(full_text)
         else:
-            # Читаем TXT файл
             return file.getvalue().decode("utf-8")
             
     except Exception as e:
@@ -64,15 +58,11 @@ def parse_correct_order(file_content: str) -> List[Dict]:
     for line in lines:
         line = line.strip()
         
-        # Пропускаем разделительные строки
         if re.match(r'^[-]+$', line) or not line:
             continue
             
-        # Убираем разметку типа [ ]{.mark} - сначала убираем всю разметку
         clean_line = re.sub(r'\[(.*?)\]\{\.mark\}', r'\1', line)
         
-        # Ищем строки с номерами и названиями образцов
-        # Паттерн для строк типа: "13       [КПП ВД(50,А)]{.mark}"
         match = re.match(r'^\s*(\d+)\s+(.+)$', clean_line)
         if match:
             sample_number = int(match.group(1))
@@ -90,14 +80,12 @@ def create_sample_key(sample_name: str) -> str:
     """
     Создает ключ для сопоставления образцов из разных источников
     """
-    # Нормализуем название
     normalized = re.sub(r'\s+', ' ', sample_name.strip()).lower()
     
-    # Извлекаем ключевые компоненты для сопоставления
     patterns = [
-        r'([а-я]+)\s*([а-я]+)?\s*\((\d+[-\d]*),\s*([а-я])\)',  # КПП ВД(50,А)
-        r'([а-я]+)\s*([а-я]+)?-?(\d+)?\s*\((\d+),\s*([а-я])\)', # КПП НД-1(19,А)
-        r'(\d+)[,_]\s*([а-я]+)',  # Для формата "28_КПП ВД"
+        r'([а-я]+)\s*([а-я]+)?\s*\((\d+[-\d]*),\s*([а-я])\)',
+        r'([а-я]+)\s*([а-я]+)?-?(\d+)?\s*\((\d+),\s*([а-я])\)',
+        r'(\d+)[,_]\s*([а-я]+)',
     ]
     
     for pattern in patterns:
@@ -106,7 +94,6 @@ def create_sample_key(sample_name: str) -> str:
             parts = [p for p in match.groups() if p]
             return '_'.join(parts)
     
-    # Если паттерн не найден, ищем числа в названии
     numbers = re.findall(r'\d+', normalized)
     if numbers:
         return f"sample_{numbers[-1]}"
@@ -116,7 +103,6 @@ def create_sample_key(sample_name: str) -> str:
 def parse_chemical_tables(file_content: str) -> Dict[str, List[Dict]]:
     """
     Парсит все таблицы химического анализа из файла
-    Возвращает словарь: {марка_стали: [список_образцов]}
     """
     if not file_content:
         return {}
@@ -125,37 +111,48 @@ def parse_chemical_tables(file_content: str) -> Dict[str, List[Dict]]:
     tables = {}
     current_steel_grade = None
     current_table = []
-    in_table = False
     
-    for i, line in enumerate(lines):
+    for line in lines:
         line = line.strip()
         
         # Ищем марку стали
-        steel_match = re.search(r'Марка стали:\s*([^\n]+)', line)
+        steel_match = re.search(r'Марка стали:\s*([^\n]+)', line, re.IGNORECASE)
         if steel_match:
             if current_steel_grade and current_table:
                 tables[current_steel_grade] = current_table
                 current_table = []
             current_steel_grade = steel_match.group(1).strip()
-            in_table = False
             continue
         
-        # Ищем начало таблицы (строки с множеством дефисов)
-        if re.match(r'^[-\\s]{10,}', line) and current_steel_grade:
-            if not in_table:
-                in_table = True
-            continue
-        
-        # Парсим строки с образцами
-        if in_table and current_steel_grade:
-            # Пропускаем строки с требованиями ТУ
-            if 'Требования ТУ' in line or '14-3Р-55-2001' in line:
+        # Более гибкий поиск строк с образцами
+        if current_steel_grade:
+            # Пропускаем технические строки
+            if any(x in line for x in ['Требования ТУ', '14-3Р-55-2001', '---', '###']):
                 continue
+            
+            # Ищем строки, которые содержат номер и название образца
+            # Более гибкий паттерн: число, потом текст, потом числа с запятыми
+            if re.match(r'^\s*\d+\s+[^\d]', line) and re.search(r'\d+,\d+', line):
+                # Пробуем разные способы разделения
+                parts = []
                 
-            # Ищем строки с образцами (содержат номер и название)
-            if re.match(r'^\s*\d+\s+[а-яА-Я]', line):
-                # Разделяем по множественным пробелам
-                parts = re.split(r'\s{2,}', line.strip())
+                # Попробуем разделить по множественным пробелам
+                temp_parts = re.split(r'\s{2,}', line)
+                if len(temp_parts) >= 3:
+                    parts = temp_parts
+                else:
+                    # Если не получилось, пробуем разделить по одиночным пробелам
+                    temp_parts = line.split()
+                    if len(temp_parts) >= 3:
+                        # Найдем где заканчивается название и начинаются измерения
+                        # Измерения - это числа с запятыми
+                        for i in range(2, len(temp_parts)):
+                            if re.match(r'^\d+,\d+$', temp_parts[i]):
+                                name_parts = temp_parts[1:i]
+                                measurement_parts = temp_parts[i:]
+                                parts = [temp_parts[0], ' '.join(name_parts)] + measurement_parts
+                                break
+                
                 if len(parts) >= 3:
                     sample_data = {
                         'original_name': parts[1],
@@ -192,7 +189,6 @@ def match_and_sort_samples(original_samples: List[Dict], correct_samples: List[D
                 'key': original['key']
             })
     
-    # Сортируем по порядку из правильного списка
     matched_samples.sort(key=lambda x: x['order'])
     return matched_samples
 
@@ -230,28 +226,12 @@ st.markdown("""
         margin-bottom: 2rem;
         font-weight: bold;
     }
-    .stats-card { 
-        background-color: #f0f2f6; 
-        padding: 1rem; 
-        border-radius: 0.5rem; 
-        margin: 0.5rem 0;
-        text-align: center;
-    }
-    .success-text { 
-        color: #28a745; 
-        font-weight: bold; 
-        font-size: 1.2rem;
-    }
-    .warning-text { 
-        color: #ffc107; 
-        font-weight: bold;
-        font-size: 1.2rem;
-    }
-    .file-info {
-        background-color: #e8f4fd;
-        padding: 0.5rem;
-        border-radius: 0.3rem;
-        margin: 0.3rem 0;
+    .debug-box {
+        background-color: #fff3cd;
+        border: 1px solid #ffeaa7;
+        border-radius: 5px;
+        padding: 15px;
+        margin: 10px 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -259,20 +239,13 @@ st.markdown("""
 def main():
     st.markdown('<div class="main-header">🔬 Автоматическая сортировка химического анализа</div>', unsafe_allow_html=True)
     
-    # Описание приложения
     with st.expander("📖 ИНСТРУКЦИЯ", expanded=False):
         st.markdown("""
         **Как использовать:**
-        1. Загрузите файл с правильным порядком образцов (TXT или DOCX)
-        2. Загрузите файл с результатами химического анализа (TXT или DOCX)  
+        1. Загрузите файл с правильным порядком образцов
+        2. Загрузите файл с результатами химического анализа  
         3. Нажмите кнопку "Обработать данные"
         4. Просмотрите таблицу сопоставления и отсортированные результаты
-
-        **Принцип сопоставления:**
-        Программа ищет совпадения по цифрам в названиях:
-        - "КПП ВД 2, труба 28" → "КПП ВД(28,Г)" (сопоставление по числу 28)
-        - "НГ 28_КПП ВД" → "КПП ВД(28,Г)" 
-        - "КПП ВД 2, труба 122" → "КПП ВД(50,А)"
         """)
     
     # Загрузка файлов
@@ -300,6 +273,9 @@ def main():
         if chemical_analysis_file:
             st.success(f"✅ Загружен: {chemical_analysis_file.name}")
     
+    # Отладочная информация
+    debug_mode = st.checkbox("🔧 Режим отладки (показать сырые данные)")
+    
     # Кнопка обработки
     if st.button("🚀 ОБРАБОТАТЬ ДАННЫЕ", type="primary", use_container_width=True):
         if not correct_order_file or not chemical_analysis_file:
@@ -316,6 +292,14 @@ def main():
                 st.error("❌ Ошибка чтения файлов")
                 return
             
+            if debug_mode:
+                st.subheader("🔍 СЫРЫЕ ДАННЫЕ")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.text_area("Файл порядка:", correct_order_content, height=200)
+                with col2:
+                    st.text_area("Файл анализа:", chemical_analysis_content, height=200)
+            
             # Парсинг
             with st.spinner("🔍 Анализирую данные..."):
                 correct_samples = parse_correct_order(correct_order_content)
@@ -327,7 +311,37 @@ def main():
                 
             if not chemical_tables:
                 st.error("❌ Не найдены таблицы анализа")
+                
+                # Показываем отладочную информацию
+                st.markdown('<div class="debug-box">', unsafe_allow_html=True)
+                st.write("**Отладочная информация:**")
+                st.write("Попробую найти образцы вручную...")
+                
+                # Альтернативный парсинг
+                lines = chemical_analysis_content.split('\n')
+                found_samples = []
+                for i, line in enumerate(lines):
+                    if re.search(r'КПП|труба|\d+,\d+', line) and not any(x in line for x in ['Требования', 'Марка стали']):
+                        st.write(f"Строка {i}: {line[:100]}...")
+                        found_samples.append(line)
+                
+                if found_samples:
+                    st.write(f"Найдено потенциальных строк: {len(found_samples)}")
+                st.markdown('</div>', unsafe_allow_html=True)
                 return
+            
+            # Отладочная информация о найденных данных
+            if debug_mode:
+                st.subheader("🔍 ПАРСИНГ ДАННЫХ")
+                st.write(f"Найдено образцов в правильном порядке: {len(correct_samples)}")
+                for sample in correct_samples[:5]:
+                    st.write(f" - №{sample['order']}: {sample['correct_name']} → ключ: {sample['key']}")
+                
+                st.write(f"Найдено таблиц анализа: {len(chemical_tables)}")
+                for steel_grade, samples in chemical_tables.items():
+                    st.write(f" - {steel_grade}: {len(samples)} образцов")
+                    for sample in samples[:3]:
+                        st.write(f"   * {sample['original_name']} → ключ: {sample['key']}")
             
             # Обработка
             with st.spinner("🔄 Сопоставляю и сортирую..."):
@@ -337,7 +351,6 @@ def main():
                 for steel_grade, samples in chemical_tables.items():
                     sorted_samples = match_and_sort_samples(samples, correct_samples)
                     if sorted_samples:
-                        # Создаем таблицу с измерениями
                         num_measurements = len(sorted_samples[0]['measurements'])
                         columns = ['№', 'Образец'] + [f'Измерение {i+1}' for i in range(num_measurements)]
                         
@@ -407,7 +420,7 @@ def main():
                     
                     st.download_button(
                         label="📦 Скачать все таблицы (Excel)",
-                        data=excel_buffer_all,
+                        data=ex_buffer_all,
                         file_name="все_отсортированные_таблицы.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="download_all",
@@ -418,6 +431,8 @@ def main():
                 
         except Exception as e:
             st.error(f"❌ Ошибка: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
 
 if __name__ == "__main__":
     main()
